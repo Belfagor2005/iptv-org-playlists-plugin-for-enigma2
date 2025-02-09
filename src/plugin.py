@@ -1,7 +1,7 @@
 # for localized messages
 from . import _, group_titles
 
-from os import makedirs as os_makedirs, path as os_path
+from os import makedirs as os_makedirs, path as os_path, remove as os_remove
 from requests import get, exceptions
 from shutil import rmtree
 from time import time
@@ -17,14 +17,61 @@ from Plugins.Plugin import PluginDescriptor
 from Screens.ChoiceBox import ChoiceBox
 from Screens.MessageBox import MessageBox
 from Screens.Screen import Screen, ScreenSummary
-from Tools.Directories import sanitizeFilename
-
-
+# from Tools.Directories import sanitizeFilename
+from unicodedata import normalize
+from re import split
 config.plugins.iptv_org = ConfigSubsection()
 choices = {"genre": _("genre"), "language": _("language"), "country": _("country")}
 config.plugins.iptv_org.current = ConfigSelection(choices=[(x[0], x[1]) for x in choices.items()], default=list(choices.keys())[0])
 for choice in choices:
 	setattr(config.plugins.iptv_org, choice, ConfigText("", False))
+
+# mod lululla for dreambox and sanityze 20250209
+
+def sanitizeFilename(filename):
+	"""Return a fairly safe version of the filename.
+
+	We don't limit ourselves to ascii, because we want to keep municipality
+	names, etc, but we do want to get rid of anything potentially harmful,
+	and make sure we do not exceed Windows filename length limits.
+	Hence a less safe blacklist, rather than a whitelist.
+	"""
+	blacklist = ["\\", "/", ":", "*", "?", "\"", "<", ">", "|", "\0", "(", ")", " "]
+	reserved = [
+		"CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5",
+		"COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5",
+		"LPT6", "LPT7", "LPT8", "LPT9",
+	]  # Reserved words on Windows
+	filename = "".join(c for c in filename if c not in blacklist)
+	# Remove all charcters below code point 32
+	filename = "".join(c for c in filename if 31 < ord(c))
+	filename = normalize("NFKD", filename)
+	filename = filename.rstrip(". ")  # Windows does not allow these at end
+	filename = filename.strip()
+	if all([x == "." for x in filename]):
+		filename = "__" + filename
+	if filename in reserved:
+		filename = "__" + filename
+	if len(filename) == 0:
+		filename = "__"
+	if len(filename) > 255:
+		parts = split(r"/|\\", filename)[-1].split(".")
+		if len(parts) > 1:
+			ext = "." + parts.pop()
+			filename = filename[:-len(ext)]
+		else:
+			ext = ""
+		if filename == "":
+			filename = "__"
+		if len(ext) > 254:
+			ext = ext[254:]
+		maxl = 255 - len(ext)
+		filename = filename[:maxl]
+		filename = filename + ext
+		filename = filename.rstrip(". ")
+		if len(filename) == 0:
+			filename = "__"
+	return filename
 
 
 class Fetcher():
@@ -58,6 +105,7 @@ class Fetcher():
 				f.write(response.content)
 		except exceptions.RequestException as error:
 			print("[iptv-org plugin] failed to download", link)
+			print("[iptv-org plugin] error", str(error))
 
 	def getPlaylist(self):
 		current = self.playlists_processed[config.plugins.iptv_org.current.value]
@@ -123,19 +171,31 @@ class PluginSetup(Screen):
 		self["key_yellow"] = StaticText(_("Toggle all"))
 		self["key_blue"] = StaticText(self.keyBlueText)
 		self["description"] = StaticText("")
-		self["actions"] = ActionMap(["SetupActions", "ColorActions"],
-		{
-			"ok": self["config"].toggleSelection,
-			"save": self.keyCreate,
-			"cancel": self.keyCancel,
-			"yellow": self["config"].toggleAllSelection,
-			"blue": self.keyCategory,
-		}, -2)
+		self["actions"] = ActionMap(
+			[
+				"SetupActions",
+				"ColorActions"
+			],
+			{
+				"ok": self["config"].toggleSelection,
+				"save": self.keyCreate,
+				"cancel": self.keyCancel,
+				"yellow": self["config"].toggleAllSelection,
+				"blue": self.keyCategory,
+			},
+			-2
+		)
 		self.loading_message = _("Downloading playlist - Please wait!")
 		self["description"].text = self.loading_message
 		self.onClose.append(self.__onClose)
 		self.timer = eTimer()
-		self.timer.callback.append(self.buildList)
+		# self.timer.callback.append(self.buildList)
+		if hasattr(self.timer, "callback"):
+			self.timer.callback.append(self.buildList)
+		else:
+			if os_path.exists("/usr/bin/apt-get"):
+				self.timer_conn = self.timer.timeout.connect(self.buildList)
+			print("[Version Check] ERROR: eTimer does not support callback.append()")
 		self.timer.start(10, 1)
 
 	def __onClose(self):
@@ -170,7 +230,13 @@ class PluginSetup(Screen):
 				getattr(config.plugins.iptv_org, choice).save()
 			configfile.save()
 			self.runtimer = eTimer()
-			self.runtimer.callback.append(self.doRun)
+			# self.runtimer.callback.append(self.doRun)
+			if hasattr(self.runtimer, "callback"):
+				self.runtimer.callback.append(self.doRun)
+			else:
+				if os_path.exists("/usr/bin/apt-get"):
+					self.runtimer_conn = self.runtimer.timeout.connect(self.doRun)
+				print("[Version Check] ERROR: eTimer does not support callback.append()")
 			self.runtimer.start(10, 1)
 		else:
 			self.session.open(MessageBox, _("Please select the bouquets you wish to create"))
@@ -241,5 +307,6 @@ class PluginSummary(ScreenSummary):
 def PluginMain(session, **kwargs):
 	return session.open(PluginSetup)
 
+
 def Plugins(**kwargs):
-	return [PluginDescriptor(name="iptv-org playlists", description=_("Make IPTV bouquets based on m3u playlists from github.com/iptv-org"), where=PluginDescriptor.WHERE_PLUGINMENU, needsRestart=True, fnc=PluginMain)]
+	return [PluginDescriptor(name="iptv-org playlists", description=_("Make IPTV bouquets based on m3u playlists from github.com/iptv-org"), where=PluginDescriptor.WHERE_PLUGINMENU, icon="icon.png", needsRestart=True, fnc=PluginMain)]
